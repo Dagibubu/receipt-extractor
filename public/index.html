@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<!--
+  This is the entire frontend: one HTML file with its CSS and JavaScript
+  inline. There's no build step, no framework, no npm packages needed for
+  this part — just plain HTML/CSS/JS that any browser understands.
+
+  What this page does, in plain terms:
+    1. Shows a file picker (which on phones also offers "take photo").
+    2. When a file is chosen, sends it to our own backend's
+       POST /api/extract-receipt endpoint.
+    3. Shows the returned summary (transaction ID, date, amount, currency).
+
+  Because this file lives in the same Express app as the API (see
+  src/server.js), the browser calls "/api/extract-receipt" as a *relative*
+  URL — it automatically resolves to whatever host this page was loaded
+  from (localhost while you're testing, your Render URL once deployed).
+  That's what avoids any CORS configuration headaches.
+-->
+<html lang="en">
+<head>
+  <!-- Character encoding — always include this; prevents garbled text -->
+  <meta charset="UTF-8" />
+
+  <!-- Makes the page render at a readable size on phones instead of
+       zoomed-out desktop scale -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Receipt Extractor</title>
+
+  <style>
+    /* ---------- Basic page styling ---------- */
+
+    /* box-sizing: border-box means padding/border are included in an
+       element's declared width, instead of added on top of it. This is
+       the standard "make sizing predictable" reset almost every site uses. */
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      /* A generic, widely-available font stack. If the first font isn't
+         installed on the user's device, the browser tries the next one. */
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 480px;       /* keeps the layout narrow and phone-friendly */
+      margin: 0 auto;         /* centers the content horizontally */
+      padding: 24px 16px;
+      background: #f7f7f8;
+      color: #1a1a1a;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 4px;
+    }
+
+    p.subtitle {
+      color: #666;
+      margin-top: 0;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+    }
+
+    /* The card that holds the upload control */
+    .upload-card {
+      background: white;
+      border: 2px dashed #ccc;
+      border-radius: 12px;
+      padding: 32px 16px;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    /* Hide the raw, ugly default file input... */
+    #fileInput {
+      display: none;
+    }
+
+    /* ...and style the <label> that triggers it instead, so we get a
+       nicely styled button we control the look of */
+    .upload-button {
+      display: inline-block;
+      background: #2563eb;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .upload-button:active {
+      background: #1d4ed8; /* darker shade for the pressed state */
+    }
+
+    /* Shown while the image is uploading / being processed */
+    #status {
+      text-align: center;
+      margin: 16px 0;
+      color: #444;
+      font-size: 0.9rem;
+    }
+
+    /* The card that shows results once we get a response back */
+    .result-card {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      display: none; /* hidden until we have a result to show */
+    }
+
+    .result-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #eee;
+    }
+
+    .result-row:last-child {
+      border-bottom: none;
+    }
+
+    .result-label {
+      color: #666;
+      font-size: 0.85rem;
+    }
+
+    .result-value {
+      font-weight: 600;
+      text-align: right;
+    }
+
+    .amount {
+      font-size: 1.6rem;
+      color: #16a34a; /* green, to draw the eye to the key number */
+    }
+
+    /* Simple collapsible section for the full raw data, for debugging */
+    details {
+      margin-top: 16px;
+      font-size: 0.8rem;
+      color: #666;
+    }
+
+    pre {
+      background: #f3f3f3;
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto; /* horizontal scroll instead of breaking layout
+                            if the JSON line is long */
+      font-size: 0.75rem;
+    }
+
+    .error {
+      color: #dc2626;
+      text-align: center;
+      margin: 16px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Receipt Extractor</h1>
+  <p class="subtitle">Upload or photograph a receipt to extract the transaction details.</p>
+
+  <!-- ============ UPLOAD SECTION ============ -->
+  <div class="upload-card">
+    <!--
+      The <label for="fileInput"> trick: clicking anywhere on this styled
+      label acts as if you clicked the (hidden) <input> it's linked to via
+      the "for" attribute matching the input's "id". This is how we get a
+      custom-looking button that still triggers the native file picker.
+    -->
+    <label for="fileInput" class="upload-button">Choose or Take Photo</label>
+
+    <!--
+      type="file": lets the user pick a file from their device.
+      accept="image/*": only shows image files in the picker.
+      capture="environment": on phones, this hints the browser to offer
+        the *back* camera directly (as opposed to the front-facing one),
+        which is what you want for photographing a receipt.
+    -->
+    <input
+      type="file"
+      id="fileInput"
+      accept="image/*"
+      capture="environment"
+    />
+
+    <p id="fileName" style="margin-top: 12px; font-size: 0.85rem; color: #888;"></p>
+  </div>
+
+  <!-- Shown while we're waiting on the server -->
+  <p id="status"></p>
+
+  <!-- Shown if something goes wrong -->
+  <p id="error" class="error"></p>
+
+  <!-- ============ RESULTS SECTION ============ -->
+  <div class="result-card" id="resultCard">
+    <div class="result-row">
+      <span class="result-label">Amount</span>
+      <span class="result-value amount" id="resultAmount">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-label">Transaction ID</span>
+      <span class="result-value" id="resultTxnId">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-label">Date</span>
+      <span class="result-value" id="resultDate">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-label">Document Type</span>
+      <span class="result-value" id="resultDocType">-</span>
+    </div>
+
+    <!-- <details> is a native HTML element: a click-to-expand section.
+         No JavaScript needed to make it collapsible — the browser
+         handles that for free. Useful here for the raw JSON, which most
+         viewers won't need to see but a developer debugging might. -->
+    <details>
+      <summary>View full raw data</summary>
+      <pre id="rawJson"></pre>
+    </details>
+  </div>
+
+  <script>
+    // ---------- Grab references to the DOM elements we'll update ----------
+    // document.getElementById() finds the HTML element with that id
+    // attribute, so we can read from or write to it in JavaScript.
+    const fileInput = document.getElementById("fileInput");
+    const fileNameEl = document.getElementById("fileName");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const resultCard = document.getElementById("resultCard");
+    const resultAmount = document.getElementById("resultAmount");
+    const resultTxnId = document.getElementById("resultTxnId");
+    const resultDate = document.getElementById("resultDate");
+    const resultDocType = document.getElementById("resultDocType");
+    const rawJson = document.getElementById("rawJson");
+
+    // "change" fires whenever the user picks a new file (or takes a photo).
+    // We attach our upload logic to that event.
+    fileInput.addEventListener("change", async (event) => {
+      // event.target.files is a list of chosen files; we only accept one,
+      // so we grab the first (and only) one.
+      const file = event.target.files[0];
+      if (!file) return; // user cancelled the picker; nothing to do
+
+      fileNameEl.textContent = file.name;
+
+      // Reset the UI to a clean "in progress" state before each upload,
+      // in case this isn't the user's first photo this session.
+      resultCard.style.display = "none";
+      errorEl.textContent = "";
+      statusEl.textContent = "Reading receipt... this can take a few seconds.";
+
+      // FormData is the browser's built-in way to build a multipart/form-data
+      // body — the same format an HTML <form> would submit, and what our
+      // Express backend's `multer` middleware expects on the other end.
+      const formData = new FormData();
+      // "image" here must match the field name our API expects:
+      // upload.single("image") in src/server.js.
+      formData.append("image", file);
+
+      try {
+        // fetch() sends the HTTP request. We POST to a *relative* path,
+        // so it automatically targets whatever host served this page.
+        const response = await fetch("/api/extract-receipt", {
+          method: "POST",
+          body: formData,
+          // Note: we deliberately do NOT set a Content-Type header here.
+          // The browser sets it automatically for FormData, including the
+          // required "boundary" string multipart parsing needs — setting
+          // it manually is a common mistake that breaks the upload.
+        });
+
+        // response.json() parses the HTTP response body as JSON and
+        // gives us back a normal JavaScript object.
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+          // The server responds with a non-2xx status and/or
+          // { success: false, error: "..." } when extraction fails.
+          throw new Error(result.error || "Something went wrong reading that image.");
+        }
+
+        // ---------- Populate the results card ----------
+        const summary = result.summary || {};
+
+        // A currency-aware amount display, e.g. "280 ETB" or "$10.36".
+        resultAmount.textContent =
+          summary.amount != null
+            ? `${summary.amount} ${summary.currency || ""}`.trim()
+            : "Not found";
+
+        resultTxnId.textContent = summary.transaction_id || "Not found";
+        resultDate.textContent = summary.transaction_date || "Not found";
+        resultDocType.textContent = result.document_type || "unknown";
+
+        // JSON.stringify(obj, null, 2) turns the object back into a
+        // formatted, indented JSON string for display in the <pre> block.
+        rawJson.textContent = JSON.stringify(result, null, 2);
+
+        statusEl.textContent = "";
+        resultCard.style.display = "block";
+      } catch (err) {
+        // Anything that throws above (network failure, bad JSON, our own
+        // thrown Error) lands here. We surface it plainly to the user.
+        statusEl.textContent = "";
+        errorEl.textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>
